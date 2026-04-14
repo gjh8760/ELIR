@@ -1,0 +1,827 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>experiment_plan_v2_LCFM</title>
+<style>
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+       max-width: 900px; margin: 2em auto; padding: 0 1em; line-height: 1.6; color: #24292f; }
+h1, h2, h3, h4 { border-bottom: 1px solid #eaecef; padding-bottom: .3em; }
+code { background: #f6f8fa; padding: 2px 4px; border-radius: 3px; font-size: 95%; }
+pre { background: #f6f8fa; padding: 12px; border-radius: 6px; overflow-x: auto; }
+pre code { background: none; padding: 0; }
+table { border-collapse: collapse; margin: 1em 0; }
+th, td { border: 1px solid #d0d7de; padding: 6px 12px; }
+th { background: #f6f8fa; }
+blockquote { border-left: 4px solid #d0d7de; padding: 0 1em; color: #57606a; margin-left: 0; }
+a { color: #0969da; text-decoration: none; }
+a:hover { text-decoration: underline; }
+hr { border: none; border-top: 1px solid #eaecef; }
+</style>
+</head>
+<body>
+<h1 id="retinex-guided-latent-consistency-flow-matching-for-low-light-image-enhancement">Retinex-Guided Latent Consistency Flow Matching for Low-Light Image Enhancement</h1>
+<h2 id="neurips-2026-v2-elir">NeurIPS 2026 실험 계획서 (v2 — ELIR 기반)</h2>
+<blockquote>
+<p><strong>변경 사항:</strong> MeanFlow(JVP 연산 과다) → ELIR의 LCFM(Latent Consistency Flow Matching) 방식으로 전환<br />
+<strong>핵심 방법:</strong> Latent space에서 OT-CFM + consistency distillation, Retinex 분해 기반 dual-flow<br />
+<strong>총 소요:</strong> ~10주 | <strong>목표:</strong> NeurIPS 2026</p>
+</blockquote>
+<h3 id="lol-v1-psnr">성능 타깃 (LOL-v1 PSNR 기준)</h3>
+<table>
+<thead>
+<tr>
+<th>구분</th>
+<th>PSNR</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>현재 Phase 1 (Direct LCFM baseline)</td>
+<td><strong>22.10 dB</strong></td>
+</tr>
+<tr>
+<td>SOTA 근방 (LLIE 최신 기법 수준, 논문 경쟁력 마지노선)</td>
+<td><strong>25.5 ~ 26+ dB</strong></td>
+</tr>
+<tr>
+<td>필요 개선폭</td>
+<td><strong>+3 dB 이상</strong></td>
+</tr>
+</tbody>
+</table>
+<p>Phase 2 이후 모든 단계의 설계 결정은 이 <strong>+3dB 갭</strong>을 좁히는 것을 1순위로 삼아야 합니다.
+단순히 "Phase 1 대비 0.5dB 개선"만으로는 SOTA 경쟁이 불가능하므로, 개선폭이 기대 이하이면 조기에 pivot (예: pixel space, VAE 교체, 더 큰 Eω/flow, data augmentation/추가 데이터) 해야 합니다.</p>
+<hr />
+<h2 id="elir">방법론 요약: ELIR이 하는 것과 우리가 다르게 할 것</h2>
+<h3 id="elir_1">ELIR의 핵심 파이프라인</h3>
+<ol>
+<li>Tiny AutoEncoder로 이미지를 latent space로 압축 (512×512 → 64×64×16)</li>
+<li>Latent MMSE estimator: coarse L2 predictor로 latent 수준에서 1차 복원</li>
+<li>LCFM: OT-conditional flow matching + consistency flow matching을 결합하여 few-step(1-4 NFE) 생성</li>
+<li>전부 CNN 기반, transformer 없음</li>
+</ol>
+<h3 id="novelty">우리가 다르게 할 것 (novelty)</h3>
+<ul>
+<li>ELIR: 단일 flow로 LQ→HQ 전체를 한 번에 처리</li>
+<li>Ours: Retinex 분해 후 I-flow, R-flow를 각각 학습 + cross-guidance로 coupling</li>
+<li>ELIR: generic restoration (face, SR, denoising 등)</li>
+<li>Ours: LLIE에 특화된 physics-informed 설계</li>
+<li>추가: perception-distortion tradeoff를 σ로 제어 (PMRF 아이디어 차용)</li>
+</ul>
+<hr />
+<h2 id="phase-0-lcfm-feasibility-on-llie-1">Phase 0: LCFM Feasibility on LLIE (1주)</h2>
+<h3 id="_1">목적</h3>
+<p>ELIR 방식의 LCFM이 low-light enhancement에서 작동하는지 최소 비용으로 검증.
+MeanFlow와 달리 JVP가 없으므로 구현 리스크는 낮지만, LLIE 특화 세팅에서의 성능을 확인해야 함.</p>
+<h3 id="_2">실험 설계</h3>
+<ul>
+<li>데이터: LOL-v1 (485 pairs), 256×256 random crop</li>
+<li>구조: ELIR 논문의 파이프라인을 최대한 그대로 재현하되 LLIE용으로 세팅</li>
+<li>AutoEncoder: Tiny AutoEncoder (TAESD, SD3 VAE의 경량 버전, 1.2M params)<ul>
+<li>설치: <code>pip install diffusers</code> → <code>AutoencoderTiny.from_pretrained("madebyollin/taesd3")</code></li>
+<li>입력 이미지를 latent space로 인코딩: 3×H×W → 16×(H/8)×(W/8)</li>
+</ul>
+</li>
+<li>Coarse estimator: 소형 CNN (3-layer conv, latent→latent L2 regression)</li>
+<li>Flow network: 소형 U-Net (latent space에서 동작, ~5M params)</li>
+</ul>
+<h3 id="training-elir">Training 과정 (ELIR 방식)</h3>
+<pre><code>Step 1: AutoEncoder freeze, coarse estimator gφ 학습
+  z_lq = E(x_lowlight)         # encode low-light to latent
+  z_hq = E(x_normal)           # encode normal to latent (GT)
+  z_coarse = gφ(Eω(x_lowlight)) # coarse estimation
+  loss_coarse = MSE(z_coarse, z_hq)
+
+Step 2: Flow matching 학습 (coarse 결과를 source로)
+  z_0 = z_coarse + σ_s · ε     # coarse estimate + small noise
+  z_1 = z_hq                    # target
+  z_t = t·z_1 + (1-(1-σ_min)·t)·z_0  # OT interpolation
+  loss_fm = MSE(vθ(z_t, t), z_1 - (1-σ_min)·z_0)
+
+Step 3: Consistency distillation (optional, few-step 개선)
+  teacher의 multi-step ODE 결과를 student가 fewer step으로 근사
+</code></pre>
+<h3 id="inference">Inference</h3>
+<pre><code class="language-python">z_lq = E(x_lowlight)
+z_coarse = gφ(Eω(x_lowlight))
+z_0 = z_coarse + σ_s * noise
+# Euler solve: 1~4 steps
+for step in range(num_steps):
+    z = z + dt * vθ(z, t)
+x_enhanced = D(z)  # decode back to pixel space
+</code></pre>
+<h3 id="gono-go">Go/No-Go</h3>
+<ul>
+<li>✅ 4-NFE에서 LOL-v1 PSNR ≥ 19dB → proceed</li>
+<li>✅ 시각적으로 밝기 개선 + noise 감소 확인 → proceed</li>
+<li>❌ latent space 복원이 pixel space 대비 심하게 열화 → AutoEncoder 교체 검토</li>
+<li>❌ 학습 불안정 → σ_s, σ_min hyperparameter 조정</li>
+</ul>
+<hr />
+<h2 id="phase-1-direct-lcfm-llie-baseline-2">Phase 1: Direct LCFM LLIE Baseline (2주)</h2>
+<h3 id="_3">목적</h3>
+<p>Retinex 없이 direct LCFM으로 LLIE baseline 성능 확립.
+Phase 0의 toy 실험을 full-scale로 확장.</p>
+<h3 id="network-architecture">Network Architecture</h3>
+<h4 id="autoencoder-teacher-frozen">AutoEncoder (teacher, frozen)</h4>
+<ul>
+<li>Tiny AutoEncoder <strong>TAESD3</strong> (<code>madebyollin/taesd3</code>): encoder + decoder</li>
+<li>압축비: 8× spatial, 16ch latent</li>
+<li>256×256 입력 → 32×32×16 latent</li>
+<li><code>teacher_cfg.name: taesd</code>, <code>trainable: False</code> (decoder도 inference에서만 사용)</li>
+</ul>
+<h4 id="trainable-encoder-e-tiny_enc">Trainable Encoder Eω (tiny_enc)</h4>
+<ul>
+<li>TAESD3 encoder 가중치로 초기화 후 학습 가능(<code>enc_cfg.trainable: True</code>)</li>
+<li>LQ 이미지 전용으로 fine-tuning (degradation에 적응)</li>
+</ul>
+<h4 id="coarse-estimator-g-mmse-55m">Coarse Estimator gφ (mmse, ~5.5M)</h4>
+<ul>
+<li><strong>RRDBNet</strong> (<code>mmse_cfg.name: rrdbnet</code>): 3개의 RRDB 블록(각 RRDB = 3× ResidualDenseBlock_5C), <code>c_inout=16, c_hid=96, n_rrdb=3</code></li>
+<li>Input/Output: 16ch latent → 16ch latent (residual 연결)</li>
+<li>L2 loss로 학습(실제로는 아래 통합 loss의 첫 항)</li>
+</ul>
+<h4 id="flow-network-v-lunet-296m">Flow Network vθ (lunet, ~29.6M)</h4>
+<ul>
+<li>Latent space U-Net (<code>fmir_cfg.name: lunet</code>)</li>
+<li>Input: <strong>z_t만(16ch)</strong> — z_coarse는 flow의 source z_0로 사용되며 채널 concat은 아님</li>
+<li>Output: 16ch (velocity)</li>
+<li><code>ch_mult=[1,2,1,2]</code>, <code>hid_channels=128</code> (base 128), <code>n_mid_blocks=3</code>, skip connections 있음</li>
+<li>Time conditioning: sinusoidal positional embedding(<code>t_emb_dim=160</code>) → MLP → ResnetBlock 출력에 per-channel bias로 더함 (AdaGN 아님)</li>
+</ul>
+<h4 id="lcfm-training-loss-l2_cfm_mse_loss">LCFM Training Loss (실제 구현: <code>l2_cfm_mse_loss</code>)</h4>
+<p>한 번의 loss 안에 MMSE + segment-endpoint consistency + pixel-space MSE가 α, β 계수로 결합되어 있습니다(2-phase 분리 학습 아님).</p>
+<pre><code class="language-python"># 1) MMSE (coarse) loss (latent space)
+X_hq    = E_teacher(x_hq).detach()
+X_lq    = Eω(x_lq)
+X_mmse  = gφ(X_lq)
+loss    = MSE(X_hq, X_mmse)
+
+# 2) Flow source 구성: coarse + small noise
+X0 = X_mmse.detach() + σ_s * ε,   ε ~ N(0, I)
+
+# 3) t 샘플링 &amp; segment endpoint
+# [0,1]을 K=k_steps=5 구간으로 분할, t가 속한 segment의 오른쪽 끝 seg_end
+segments   = linspace(0, 1, K+1)
+seg_end    = segments[searchsorted(segments, t, side=&quot;left&quot;).clamp(min=1)]
+X_ends     = (1 - (1-σ_min)*seg_end) * X0 + seg_end * X_hq
+
+# 4) OT-CFM 경로 위의 두 점 Xt, X_{t+dt}에서 velocity 예측
+Xt = (1 - (1-σ_min)*t) * X0 + t * X_hq
+v0 = vθ(Xt,  pos_emb(t))
+with no_grad():
+    Xr = (1 - (1-σ_min)*(t+dt)) * X0 + (t+dt) * X_hq
+    v0_ = vθ(Xr, pos_emb(t+dt))
+
+# 5) Segment-endpoint consistency: 두 점에서 seg_end까지 extrapolate한 결과가 일치하도록
+f0  = Xt + (seg_end - t)     * v0
+f0_ = (r_less) * (Xr + (seg_end - (t+dt)) * v0_) + (~r_less) * X_ends    # r_less = (t+dt) &lt; seg_end
+loss += (1-β) * ( MSE(f0, f0_) + α * MSE(v0, v0_) )
+
+# 6) Pixel-space MSE (decoder 경유)
+X1       = f0.detach() + (1 - seg_end) * vθ(f0.detach(), pos_emb(seg_end))
+x_hq_hat = D_teacher(X1)
+loss += β * MSE(x_hq, x_hq_hat)
+</code></pre>
+<p>참고: 수학적으로 target velocity = <code>X_hq − (1−σ_min)·X0</code>와 동치이지만, 코드에서는 velocity-MSE를 직접 쓰지 않고 segment 끝점 일치(consistency) 형태로 표현되어 있습니다.</p>
+<h3 id="training-details">Training Details</h3>
+<ul>
+<li>Optimizer: AdamW, lr=2e-4</li>
+<li>Batch size: <strong>8</strong> (LOL-v1 <code>our485</code>, 256×256 random crop)</li>
+<li>Schedule: <strong>1000 epochs 단일 스케줄</strong> (≈ 485/8 × 1000 ≈ 60K steps), EMA decay 0.999</li>
+<li>Validation: 20 epoch마다 (LOL-v1 <code>eval15</code>)</li>
+<li>Hyperparameters (config 기준): <code>σ_min = 1e-5</code>, <code>σ_s = 0.025</code>, <code>dt = 0.05</code>, <code>k_steps = 5</code>, <code>α = 0.001</code>, <code>β = 0.001</code>, <code>t_emb_dim = 160</code></li>
+</ul>
+<h3 id="evaluation">Evaluation</h3>
+<ul>
+<li>NFE sweep: 1, 2, 4, 8</li>
+<li>Metrics: PSNR, SSIM, LPIPS, NIQE</li>
+<li>Baselines: RetinexNet, Retinexformer, LLFlow, DiffLL</li>
+</ul>
+<h3 id="gono-go_1">Go/No-Go</h3>
+<ul>
+<li>✅ 2-NFE에서 PSNR ≥ 20dB on LOL-v1 → Phase 2</li>
+<li>✅ 4-NFE에서 Retinexformer에 근접 (차이 &lt; 1.5dB) → 유망</li>
+<li>❌ 성능 부족 → flow network 크기 확대 또는 pixel space 전환 검토</li>
+</ul>
+<hr />
+<h2 id="phase-2-retinex-decomposition-component-flows-2">Phase 2: Retinex Decomposition + Component Flows (2주)</h2>
+<h3 id="_4">목적</h3>
+<p>Retinex 분해 후 Illumination과 Reflectance에 각각 별도의 LCFM을 적용하여
+Phase 1 대비 성능 향상을 검증.</p>
+<h3 id="step-2-a-retinex-decomposer">Step 2-A: Retinex Decomposer 선택 및 구현</h3>
+<p>3가지 옵션을 순서대로 시도:</p>
+<h4 id="option-1-retinexnet-decom-net">Option 1: RetinexNet Decom-Net (추천, 먼저 시도)</h4>
+<p>RetinexNet의 Decom-Net은 가장 널리 검증된 학습 기반 decomposer입니다.</p>
+<p>구조:
+- Input: RGB image (3ch)
+- 3×3 conv → feature extraction
+- 여러 3×3 conv + ReLU layers
+- 마지막 3×3 conv → sigmoid로 R(3ch)과 I(1ch) 출력
+- 파라미터: ~0.04M (매우 경량)</p>
+<p>학습 방식 (pretrained weights 사용 시 불필요):
+- Paired low/normal 이미지를 동시에 decompose
+- Loss = Reconstruction(S = R⊙I) + Reflectance consistency(R_low ≈ R_normal) + Illumination smoothness
+- Ground truth 없이 self-supervised로 학습</p>
+<p>실제 사용:</p>
+<pre><code class="language-python"># Pretrained weights 다운로드
+# https://github.com/weichen582/RetinexNet (official TF)
+# https://github.com/aasharma90/RetinexNet_PyTorch (PyTorch 포팅)
+
+# 또는 KinD의 decomposer도 사용 가능 (더 정교)
+# https://github.com/zhangyhuaee/KinD
+
+decomposer = DecomNet(pretrained=&quot;retinexnet_decom.pth&quot;)
+decomposer.eval()  # frozen
+
+R_low, I_low = decomposer(x_lowlight)   # R: 3ch, I: 1ch
+R_norm, I_norm = decomposer(x_normal)   # paired GT도 decompose
+# x = R ⊙ I (element-wise, I는 broadcast)
+</code></pre>
+<h4 id="option-2-max-channel-baseline">Option 2: Max-Channel 기반 (가장 빠른 baseline)</h4>
+<p>학습 불필요. Retinex theory의 가장 단순한 구현:</p>
+<pre><code class="language-python">def simple_decompose(img):
+    # img: [B, 3, H, W], range [0, 1]
+    I = img.max(dim=1, keepdim=True)[0]  # [B, 1, H, W]
+    I_smooth = gaussian_blur(I, kernel_size=15, sigma=3.0)
+    I_smooth = I_smooth.clamp(min=1e-4)  # avoid division by zero
+    R = img / I_smooth  # [B, 3, H, W]
+    R = R.clamp(0, 1)
+    return R, I_smooth
+</code></pre>
+<p>장점: 즉시 사용, 외부 의존 없음
+단점: smooth kernel size가 고정이라 edge 근처에서 artifact, noise가 R에 그대로 남음</p>
+<h4 id="option-3-kind-decomposer">Option 3: KinD Decomposer (가장 정교)</h4>
+<p>KinD의 decomposer는 RetinexNet보다 정교한 구조 (multi-scale, attention).
+성능이 가장 좋지만 dependency가 복잡.
+Phase 2 후반에 Option 1 대비 성능 차이를 ablation으로 확인.</p>
+<h3 id="_5">추천 순서</h3>
+<ol>
+<li>Option 2 (max-channel)로 하루 만에 빠르게 검증</li>
+<li>효과 있으면 Option 1 (RetinexNet Decom-Net)으로 교체하여 본 실험</li>
+<li>Ablation에서 Option 3 (KinD)까지 비교</li>
+</ol>
+<h3 id="step-2-b-component-wise-lcfm-in-latent-space">Step 2-B: Component-wise LCFM in Latent Space</h3>
+<p>Retinex 분해 결과를 각각 latent space로 보내서 별도 flow를 학습:</p>
+<pre><code class="language-python"># Decompose in pixel space
+R_low, I_low = decomposer(x_lowlight)   # R: 3ch, I: 1ch (→ 3ch로 repeat)
+R_norm, I_norm = decomposer(x_normal)
+
+# I를 3ch로 확장 (AutoEncoder가 3ch 입력을 기대)
+I_low_3ch = I_low.repeat(1, 3, 1, 1)
+I_norm_3ch = I_norm.repeat(1, 3, 1, 1)
+
+# Encode to latent
+z_R_low = E(R_low)       # reflectance latent
+z_R_norm = E(R_norm)
+z_I_low = E(I_low_3ch)   # illumination latent
+z_I_norm = E(I_norm_3ch)
+
+# Coarse estimates in latent
+z_R_coarse = gφ_R(Eω_R(R_low))
+z_I_coarse = gφ_I(Eω_I(I_low_3ch))
+</code></pre>
+<p><strong>주의: I가 1ch인 문제</strong>
+AutoEncoder(TAESD)는 3ch RGB를 기대합니다. 해결법 3가지:
+- (A) I를 3ch로 repeat → 가장 단순, 다소 낭비
+- (B) I 전용 소형 1ch→latent encoder를 별도 학습 → 깔끔하지만 공수 증가
+- (C) I는 latent space 사용 안 하고 pixel space에서 직접 처리 → I가 smooth하므로 latent 불필요할 수 있음</p>
+<p><strong>추천: (C) — I는 pixel space, R만 latent space</strong></p>
+<p>근거: Illumination은 low-frequency하고 smooth해서 latent compression의 이점이 적고,
+1ch이라 AutoEncoder와 호환도 어색합니다.
+반면 Reflectance는 3ch RGB이고 texture/noise가 복잡하여 latent space flow가 효과적.</p>
+<pre><code>I-flow: pixel space에서 직접 LCFM (경량 CNN, ~3M)
+  Source: I_low → Target: I_norm
+  매우 smooth한 변환 → 1-2 NFE로 충분
+
+R-flow: latent space에서 LCFM (U-Net, ~10M)
+  Source: z_R_coarse → Target: z_R_norm
+  복잡한 noise/texture 복원 → 2-4 NFE 필요
+</code></pre>
+<h3 id="step-2-c-reconstruction">Step 2-C: Reconstruction</h3>
+<pre><code class="language-python"># Inference
+I_restored = I_low + vel_I  # pixel space, 1-NFE
+z_R_restored = euler_solve(vθ_R, z_R_coarse, steps=4)  # latent, 4-NFE
+R_restored = D(z_R_restored)  # decode to pixel
+
+x_enhanced = R_restored * I_restored  # Retinex reconstruction
+</code></pre>
+<h3 id="ablation-phase-2">Ablation (Phase 2 내)</h3>
+<table>
+<thead>
+<tr>
+<th>실험</th>
+<th>설명</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Direct LCFM (Phase 1) vs. Retinex + component LCFM</td>
+<td>Retinex 분해 가치</td>
+</tr>
+<tr>
+<td>I에만 flow + R에 plain denoiser (IllumFlow 방식 재현)</td>
+<td>R-flow 가치</td>
+</tr>
+<tr>
+<td>I-flow NFE: 1, 2, 4</td>
+<td>I의 1-NFE 충분성</td>
+</tr>
+<tr>
+<td>R-flow NFE: 1, 2, 4, 8</td>
+<td>R의 최적 NFE</td>
+</tr>
+<tr>
+<td>Decomposer: max-channel vs RetinexNet vs KinD</td>
+<td>decomposer 민감도</td>
+</tr>
+</tbody>
+</table>
+<h3 id="gono-go_2">Go/No-Go</h3>
+<ul>
+<li>✅ Phase 2 &gt; Phase 1 (PSNR ≥ 0.5dB or LPIPS 개선) → Phase 3</li>
+<li>✅ I-flow 1-NFE ≈ 4-NFE → "illumination은 1-NFE로 충분" 실증</li>
+<li>❌ Phase 2 ≤ Phase 1 → Retinex 포기, Phase 1에 Phase 4(PMRF) 적용</li>
+</ul>
+<blockquote>
+<p><strong>SOTA 관점 체크</strong>: Phase 2 끝에서도 <strong>24dB 미만</strong>이면 Retinex 설계만으로는 +3dB 갭을 메우기 어렵다는 강한 신호입니다. 이 경우 Phase 3(coupling) 전에 <strong>더 근본적 변경</strong>(더 큰 VAE / pixel-space 병행 / Eω·flow 용량 증가 / 외부 데이터 augmentation)을 먼저 고려해야 합니다.</p>
+</blockquote>
+<hr />
+<h2 id="phase-3-coupled-dual-flow-with-cross-guidance-2">Phase 3: Coupled Dual-Flow with Cross-Guidance (2주)</h2>
+<h3 id="_6">목적</h3>
+<p>Phase 2의 독립적 I-flow, R-flow를 coupling하여 cross-component interaction 효과 검증.
+<strong>논문의 핵심 novelty.</strong></p>
+<h3 id="cross-guidance">Cross-Guidance 설계</h3>
+<p>Phase 2에서 I는 pixel space, R은 latent space로 결정했으므로,
+두 flow의 정보 교환 방식을 설계해야 합니다.</p>
+<h4 id="architecture-asymmetric-coupled-flow">Architecture: Asymmetric Coupled Flow</h4>
+<pre><code class="language-python">class CoupledRetinexFlow(nn.Module):
+    def __init__(self):
+        # I-flow: pixel space, lightweight
+        self.I_net = LightweightUNet(in_ch=2, out_ch=1, base_ch=32)
+        # in_ch=2: I_t(1ch) + I_guidance_from_R(1ch)
+
+        # R-flow: latent space, heavier
+        self.R_net = LatentUNet(in_ch=32+16, out_ch=16, base_ch=64)
+        # in_ch=32: z_R_t(16ch) + z_R_coarse(16ch)
+        # +16은 아래 R_guidance_encoder의 출력
+
+        # Cross-guidance modules
+        self.R_to_I_guidance = nn.Sequential(
+            nn.Conv2d(16, 32, 3, 1, 1), nn.SiLU(),
+            nn.AdaptiveAvgPool2d(output_size=None),  # spatial align
+            nn.Conv2d(32, 1, 1, 1, 0), nn.Sigmoid()
+        )  # latent R feature → pixel space I guidance map
+
+        self.I_to_R_guidance = nn.Sequential(
+            nn.Conv2d(1, 16, 3, 2, 1), nn.SiLU(),
+            nn.Conv2d(16, 16, 3, 2, 1), nn.SiLU(),
+            nn.Conv2d(16, 16, 3, 2, 1), nn.SiLU(),
+        )  # pixel I → latent-size feature (downscale 8x to match latent)
+
+    def forward(self, I_t, z_R_t, t, I_low, z_R_coarse):
+        # Step 1: R → I guidance
+        # &quot;reflectance의 edge/texture 정보로 illumination 조절을 guide&quot;
+        R_guidance = self.R_to_I_guidance(z_R_t)
+        # upsample to pixel resolution
+        R_guidance_pixel = F.interpolate(R_guidance, size=I_t.shape[-2:])
+        I_input = torch.cat([I_t, R_guidance_pixel], dim=1)
+        vel_I = self.I_net(I_input, t)
+
+        # Step 2: I → R guidance
+        # &quot;현재 illumination 상태로 noise 제거 강도를 adaptive하게 조절&quot;
+        I_guidance = self.I_to_R_guidance(I_t)
+        R_input = torch.cat([z_R_t, z_R_coarse, I_guidance], dim=1)
+        vel_R = self.R_net(R_input, t)
+
+        return vel_I, vel_R
+</code></pre>
+<p><strong>Cross-guidance의 직관:</strong>
+- R→I guidance: reflectance의 edge 정보를 illumination flow에 전달 → edge-aware illumination adjustment (edge 경계에서 halo artifact 방지)
+- I→R guidance: 현재 시점의 illumination 밝기를 reflectance flow에 전달 → 어두운 영역(I가 낮은 곳)에서 denoising을 더 강하게, 밝은 영역에서는 약하게</p>
+<h3 id="training">Training</h3>
+<pre><code class="language-python"># Decompose
+R_low, I_low = decomposer(x_lowlight)
+R_norm, I_norm = decomposer(x_normal)
+
+# Encode R to latent
+z_R_low = E(R_low)
+z_R_norm = E(R_norm)
+z_R_coarse = gφ_R(Eω_R(R_low)).detach()  # Phase 2에서 학습한 것 재사용
+
+# OT interpolation (same t for both flows)
+t = torch.rand(B, 1, 1, 1)
+I_t = (1-t) * I_low + t * I_norm
+z_R_t = (1-t) * (z_R_coarse + σ_s * noise) + t * z_R_norm
+
+# Forward
+vel_I_pred, vel_R_pred = coupled_model(I_t, z_R_t, t, I_low, z_R_coarse)
+
+# Targets
+target_I = I_norm - I_low
+target_R = z_R_norm - (1-σ_min) * (z_R_coarse + σ_s * noise)
+
+# Loss
+loss_I = MSE(vel_I_pred, target_I)
+loss_R = MSE(vel_R_pred, target_R)
+loss = loss_I + λ * loss_R  # λ=1.5 (R이 더 어려우므로)
+
+# 이후 consistency distillation phase 추가 (Phase 1과 동일한 방식)
+</code></pre>
+<h3 id="ablation-cross-guidance">핵심 Ablation: Cross-Guidance 효과 정량화</h3>
+<table>
+<thead>
+<tr>
+<th>설정</th>
+<th>R→I</th>
+<th>I→R</th>
+<th>비교 목적</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>A: Independent (Phase 2)</td>
+<td>✗</td>
+<td>✗</td>
+<td>baseline</td>
+</tr>
+<tr>
+<td>B: R→I only</td>
+<td>✓</td>
+<td>✗</td>
+<td>edge-aware illumination</td>
+</tr>
+<tr>
+<td>C: I→R only</td>
+<td>✗</td>
+<td>✓</td>
+<td>illumination-adaptive denoising</td>
+</tr>
+<tr>
+<td>D: Bidirectional (ours)</td>
+<td>✓</td>
+<td>✓</td>
+<td>full coupling</td>
+</tr>
+</tbody>
+</table>
+<p>추가 분석:
+- R→I guidance map 시각화: edge 위치에 activation이 높은지 확인
+- I→R guidance의 영향: 어두운 영역과 밝은 영역에서 복원 품질 차이 분석
+- 이 시각화들이 논문의 qualitative 결과에서 핵심 figure가 됨</p>
+<h3 id="gono-go_3">Go/No-Go</h3>
+<ul>
+<li>✅ D &gt; A (PSNR ≥ 0.3dB 또는 LPIPS 유의미한 개선) → coupling 효과 검증</li>
+<li>❌ coupling 효과 미미 → Phase 2 결과(independent)로 논문 작성</li>
+</ul>
+<hr />
+<h2 id="phase-4-pmrf-style-controllable-enhancement-15">Phase 4: PMRF-style Controllable Enhancement (1.5주)</h2>
+<h3 id="_7">목적</h3>
+<p>단일 모델로 perception-distortion tradeoff를 σ 파라미터로 제어.</p>
+<h3 id="_8">설계</h3>
+<p>Phase 3의 coupled model을 2-stage로 확장:</p>
+<h4 id="stage-1-latent-mmse-estimator-phase-2">Stage 1: Latent MMSE Estimator (이미 Phase 2에서 학습 완료)</h4>
+<ul>
+<li>coarse estimator gφ가 E[z_R_norm | R_low]에 수렴</li>
+<li>L2 loss → PSNR 최대화, but smooth/blurry</li>
+</ul>
+<h4 id="stage-2-coupled-flow">Stage 2: Coupled Flow에서 σ 조절</h4>
+<pre><code class="language-python"># Inference time에 σ_s를 조절
+# σ_s 작으면: source ≈ coarse estimate → 변화 적음 → high PSNR, smooth
+# σ_s 크면: source에 noise 많이 추가 → flow가 더 많이 생성 → sharp but less faithful
+
+for sigma in [0.0, 0.05, 0.1, 0.2, 0.3, 0.5]:
+    z_R_0 = z_R_coarse + sigma * torch.randn_like(z_R_coarse)
+    z_R_restored = euler_solve(coupled_model.R_flow, z_R_0, steps=4)
+    # evaluate PSNR, SSIM, LPIPS, FID
+</code></pre>
+<h3 id="output">핵심 Output</h3>
+<ul>
+<li>σ vs (PSNR, LPIPS) tradeoff curve 생성</li>
+<li>기존 방법들(Retinexformer=single point, LLFlow=single point 등)과 함께 플롯</li>
+<li>우리 curve가 좌상단에 위치하면 Pareto 우위 주장 가능</li>
+</ul>
+<h3 id="gono-go_4">Go/No-Go</h3>
+<ul>
+<li>✅ σ에 따라 monotonic tradeoff → controllability 검증</li>
+<li>❌ tradeoff 불명확 → NFE 수로 대체 (1-NFE=fast, 4-NFE=quality)</li>
+</ul>
+<hr />
+<h2 id="phase-5-full-benchmark-ablation-study-2">Phase 5: Full Benchmark + Ablation Study (2주)</h2>
+<h3 id="datasets">Datasets</h3>
+<table>
+<thead>
+<tr>
+<th>Dataset</th>
+<th>Type</th>
+<th>크기</th>
+<th>용도</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>LOL-v1</td>
+<td>Paired</td>
+<td>485/15</td>
+<td>주요 벤치마크</td>
+</tr>
+<tr>
+<td>LOL-v2-real</td>
+<td>Paired</td>
+<td>689/100</td>
+<td>일반화</td>
+</tr>
+<tr>
+<td>LOL-v2-synthetic</td>
+<td>Paired</td>
+<td>900/100</td>
+<td>일반화</td>
+</tr>
+<tr>
+<td>MIT Adobe FiveK</td>
+<td>Paired</td>
+<td>5000</td>
+<td>대규모 (optional)</td>
+</tr>
+<tr>
+<td>MEF</td>
+<td>Unpaired</td>
+<td>real-world</td>
+<td>no-reference 일반화</td>
+</tr>
+<tr>
+<td>DICM, LIME, NPE</td>
+<td>Unpaired</td>
+<td>real-world</td>
+<td>no-reference 일반화</td>
+</tr>
+<tr>
+<td>ExDark</td>
+<td>Detection</td>
+<td>7363</td>
+<td>Downstream task</td>
+</tr>
+</tbody>
+</table>
+<h3 id="comparison-methods">Comparison Methods</h3>
+<ul>
+<li>Retinex: RetinexNet, KinD++, URetinex-Net, Retinexformer</li>
+<li>Flow: LLFlow, IllumFlow, FlowIE</li>
+<li>Diffusion: DiffLL, GSAD, Reti-Diff</li>
+<li>Deterministic: SNR-Aware, MIRNetv2</li>
+</ul>
+<h3 id="ablation">최종 Ablation 목록</h3>
+<table>
+<thead>
+<tr>
+<th>실험</th>
+<th>검증 내용</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Direct LCFM (Phase 1) vs. Retinex + LCFM (Phase 2)</td>
+<td>Retinex 분해 가치</td>
+</tr>
+<tr>
+<td>Independent flows vs. Coupled flows</td>
+<td>Cross-guidance 가치</td>
+</tr>
+<tr>
+<td>R→I only vs. I→R only vs. Bidirectional</td>
+<td>guidance 방향의 기여</td>
+</tr>
+<tr>
+<td>I-flow pixel vs. I-flow latent</td>
+<td>I를 pixel에서 처리하는 것의 타당성</td>
+</tr>
+<tr>
+<td>I-flow NFE sweep (1,2,4)</td>
+<td>I의 1-NFE 충분성</td>
+</tr>
+<tr>
+<td>R-flow NFE sweep (1,2,4,8)</td>
+<td>R의 최적 NFE</td>
+</tr>
+<tr>
+<td>With/without consistency distillation</td>
+<td>consistency의 few-step 개선 효과</td>
+</tr>
+<tr>
+<td>σ sweep (0.0~0.5)</td>
+<td>P-D controllability</td>
+</tr>
+<tr>
+<td>Decomposer: max-ch vs RetinexNet vs KinD</td>
+<td>decomposer 민감도</td>
+</tr>
+</tbody>
+</table>
+<h3 id="efficiency-table">Efficiency Table</h3>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Params (M)</th>
+<th>NFE</th>
+<th>Latency (ms)</th>
+<th>GPU Mem (GB)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Retinexformer</td>
+<td>1.61</td>
+<td>1</td>
+<td>~15</td>
+<td>~2</td>
+</tr>
+<tr>
+<td>LLFlow</td>
+<td>~38</td>
+<td>1</td>
+<td>~200</td>
+<td>~6</td>
+</tr>
+<tr>
+<td>DiffLL</td>
+<td>~113</td>
+<td>50+</td>
+<td>~5000</td>
+<td>~10</td>
+</tr>
+<tr>
+<td>ELIR</td>
+<td>~5</td>
+<td>1-4</td>
+<td>~10-30</td>
+<td>~1</td>
+</tr>
+<tr>
+<td>Ours</td>
+<td>~15</td>
+<td>2-5</td>
+<td>~20-50</td>
+<td>~2</td>
+</tr>
+</tbody>
+</table>
+<p>(수치는 추정, 실험으로 정확히 측정)</p>
+<h3 id="downstream-low-light-object-detection">Downstream: Low-light Object Detection</h3>
+<p>ExDark → enhanced → YOLOv8 → mAP 비교</p>
+<hr />
+<h2 id="phase-6-paper-writing-visualization-2">Phase 6: Paper Writing + Visualization (2주)</h2>
+<h3 id="neurips-9-page">논문 구조 (NeurIPS 9-page)</h3>
+<table>
+<thead>
+<tr>
+<th>Section</th>
+<th>분량</th>
+<th>핵심 내용</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1. Intro</td>
+<td>1p</td>
+<td>LLIE의 ill-posed 특성 → generative flow의 동기 → Retinex + LCFM 결합 이유</td>
+</tr>
+<tr>
+<td>2. Related Work</td>
+<td>0.7p</td>
+<td>Retinex LLIE, Flow/Diffusion LLIE, LCFM/ELIR</td>
+</tr>
+<tr>
+<td>3. Method</td>
+<td>2.5p</td>
+<td>Retinex decomposition → I-pixel/R-latent 전략 → coupled dual-flow → PMRF σ control</td>
+</tr>
+<tr>
+<td>4. Experiments</td>
+<td>3.5p</td>
+<td>Main results + ablations + efficiency + P-D curve + downstream</td>
+</tr>
+<tr>
+<td>5. Conclusion</td>
+<td>0.3p</td>
+<td>Summary + limitations</td>
+</tr>
+<tr>
+<td>Appendix</td>
+<td>-</td>
+<td>추가 시각화, 구현 세부사항</td>
+</tr>
+</tbody>
+</table>
+<h3 id="figures">핵심 Figures</h3>
+<ol>
+<li>Method overview pipeline diagram</li>
+<li>I-flow vs R-flow: I는 smooth/fast, R은 complex/multi-step 시각화</li>
+<li>Cross-guidance attention map (R→I edge map, I→R illumination-adaptive map)</li>
+<li>Qualitative comparison (LOL-v1, LOL-v2, MEF 각 2-3장)</li>
+<li>Perception-distortion tradeoff curve (σ sweep, 다른 방법들과 비교)</li>
+<li>Inference speed/efficiency bar chart</li>
+<li>Ablation results table</li>
+</ol>
+<h3 id="arxiv">arXiv 사전 공개</h3>
+<p>Submission 1-2주 전 arXiv 업로드 → priority 확보</p>
+<hr />
+<h2 id="pivot">리스크 관리 및 Pivot 전략</h2>
+<table>
+<thead>
+<tr>
+<th>실패 시나리오</th>
+<th>Pivot</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Phase 0: LCFM이 LLIE에서 작동 안 함</td>
+<td>pixel space에서 standard OT-CFM으로 전환</td>
+</tr>
+<tr>
+<td>Phase 2: Retinex 분해가 도움 안 됨</td>
+<td>direct LCFM + σ controllability만으로 논문</td>
+</tr>
+<tr>
+<td>Phase 3: coupling 효과 미미</td>
+<td>independent dual-flow로 논문 (I/R 분리 자체가 기여)</td>
+</tr>
+<tr>
+<td>Phase 4: P-D tradeoff 불명확</td>
+<td>NFE 수로 대체 controllability</td>
+</tr>
+<tr>
+<td>AutoEncoder 품질 문제</td>
+<td>SD 1.5 VAE나 SD3 VAE로 교체 (크기 증가 감수)</td>
+</tr>
+<tr>
+<td>Deadline 촉박</td>
+<td>Phase 4 생략, Phase 1-3 + Phase 5 핵심만 제출</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="elir_2">ELIR 대비 우리 방법의 차별점 정리 (리뷰어 대응)</h2>
+<table>
+<thead>
+<tr>
+<th>측면</th>
+<th>ELIR</th>
+<th>Ours</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Task</td>
+<td>Generic (face, SR, denoise, inpaint, color)</td>
+<td>LLIE 특화</td>
+</tr>
+<tr>
+<td>Image model</td>
+<td>없음 (direct LQ→HQ)</td>
+<td>Retinex (physics-based)</td>
+</tr>
+<tr>
+<td>Flow 수</td>
+<td>단일 flow</td>
+<td>Dual flow (I + R)</td>
+</tr>
+<tr>
+<td>I/R interaction</td>
+<td>해당 없음</td>
+<td>Cross-guidance coupling</td>
+</tr>
+<tr>
+<td>I 처리</td>
+<td>해당 없음</td>
+<td>Pixel space (효율적)</td>
+</tr>
+<tr>
+<td>R 처리</td>
+<td>해당 없음</td>
+<td>Latent space (고품질)</td>
+</tr>
+<tr>
+<td>Controllability</td>
+<td>없음</td>
+<td>σ-based P-D tradeoff</td>
+</tr>
+<tr>
+<td>Novelty claim</td>
+<td>LCFM 자체 제안</td>
+<td>LCFM의 LLIE 특화 확장 + Retinex coupling</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="_9">주의사항</h2>
+<ul>
+<li>Tiny AutoEncoder(TAESD)의 reconstruction 품질을 먼저 확인하세요. LOL 이미지에서 E(D(x)) ≈ x인지 체크. 만약 reconstruction error가 크면 이것이 성능의 bottleneck이 됩니다.</li>
+<li>Retinex decomposer는 반드시 freeze하세요 (joint training 시 decomposition이 degenerate할 수 있음). Ablation에서 freeze vs. joint-finetune 비교는 가능.</li>
+<li>LOL-v1이 485장으로 작으므로 overfitting 주의. Latent space에서 학습하면 effective image 크기가 줄어 overfitting 위험이 더 높을 수 있습니다. Data augmentation 적극 활용.</li>
+<li>IllumFlow와의 차별점을 논문에서 명확히 서술: IllumFlow = Rectified Flow on I only + separate denoiser for R. Ours = LCFM on both I and R + coupled + latent + controllable.</li>
+</ul>
+</body>
+</html>

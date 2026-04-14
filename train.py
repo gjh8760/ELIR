@@ -70,7 +70,11 @@ def run_train(conf):
     if train_cfg.get("wandb",False):
         import wandb
         print("WandB is enable!")
-        wandb.init(project=env_cfg.get("project_name"), dir=run_dir, group=run_name)
+        wandb.init(
+            project=env_cfg.get("project_name"), 
+            name=env_cfg.get("run_name"),
+            dir=run_dir, 
+            group=run_name)
         wandbLogger = WandbLogger(project=env_cfg.get("project_name"), dir=run_dir)
         wandb.log(dict(**conf))
 

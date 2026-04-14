@@ -56,13 +56,18 @@ def run_infer(conf):
         upscale = chop.get("upscale", 4)
         chop_size = chop.get("chop_size", 256)
         chop_stride = chop.get("chop_stride", 224)
+        chop_size_h = chop.get("chop_size_h", chop_size)
+        chop_size_w = chop.get("chop_size_w", chop_size)
+        chop_stride_h = chop.get("chop_stride_h", chop_stride)
+        chop_stride_w = chop.get("chop_stride_w", chop_stride)
 
     for img_path in tqdm(sorted(glob.glob(os.path.join(in_image_folder,"*.*")))):
         if not img_path.endswith(IMAGE_EXTENSION):
             continue
         x = to_tensor(read_image(img_path))
         if chop:
-            patch_spliter = ImageSpliterTh(x, pch_size=chop_size, stride=chop_stride, sf=sf, extra_bs=1)
+            patch_spliter = ImageSpliterTh(x, pch_size=(chop_size_h, chop_size_w),
+                                           stride=(chop_stride_h, chop_stride_w), sf=sf, extra_bs=1)
             for patch, index_infos in patch_spliter:
                 patch_h, patch_w = patch.shape[2:]
                 flag_pad = False

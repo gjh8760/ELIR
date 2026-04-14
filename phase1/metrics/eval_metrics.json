@@ -1,0 +1,17 @@
+{
+  "run_name": "elir_llie_lolv1",
+  "timestamp": "2026-04-14T16:28:15",
+  "dataset": {
+    "name": "LOLv1",
+    "path": "/data/gjh8760/datasets/LOL-v1",
+    "split": "eval15",
+    "is_train": false,
+    "batch_size": 1,
+    "num_workers": 2
+  },
+  "metrics": {
+    "psnr": 22.099750518798828,
+    "ssim": 0.8609060049057007,
+    "lpips": 0.2451557070016861
+  }
+}

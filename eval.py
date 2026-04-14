@@ -5,6 +5,9 @@ from ELIR.models.load_model import get_model
 from ELIR.datasets.dataset import get_loader
 import pytorch_lightning as L
 from ELIR.irsetup import IRSetup
+import os
+import json
+from datetime import datetime
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -35,13 +38,39 @@ def run_eval(conf):
     # Evaluation
     # ----------------------------
     eval_cfg = conf.get("eval_cfg")
-    setup = IRSetup(model, eval_cfg=eval_cfg)
+    eval_cfg["log_images"] = True
+    eval_cfg.setdefault("max_log_images", 10**6)
+
+    run_name = env_cfg.get("run_name", "eval")
+    run_dir = eval_cfg.get("out_folder") or os.path.join("./runs", run_name)
+    os.makedirs(run_dir, exist_ok=True)
+
+    setup = IRSetup(model, eval_cfg=eval_cfg, run_dir=run_dir)
     trainer = L.Trainer(logger=False)
     set_seed(seed)
     results = trainer.validate(setup, dataloaders=valloader)
     metrics = eval_cfg.get("metrics")
     for metric in metrics:
         print("{}: {:0.4f}".format(metric, results[0][metric]), end =", ")
+    print()
+
+    # Save metrics to file
+    metrics_dict = {m: float(results[0][m]) for m in metrics}
+    record = {
+        "run_name": run_name,
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "dataset": val_dataset,
+        "metrics": metrics_dict,
+    }
+    json_path = os.path.join(run_dir, "eval_metrics.json")
+    txt_path = os.path.join(run_dir, "eval_metrics.txt")
+    with open(json_path, "w") as f:
+        json.dump(record, f, indent=2)
+    with open(txt_path, "a") as f:
+        f.write("[{}] ".format(record["timestamp"]))
+        f.write(", ".join("{}: {:0.4f}".format(m, metrics_dict[m]) for m in metrics))
+        f.write("\n")
+    print("Saved metrics to {} and {}".format(json_path, txt_path))
 
 if __name__ == "__main__":
     # ----------------------------

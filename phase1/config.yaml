@@ -1,0 +1,99 @@
+dataset_cfg:
+  train_dataset:
+    batch_size: 8
+    is_train: true
+    name: LOLv1
+    num_workers: 4
+    patch_size: 256
+    path: /data/gjh8760/datasets/LOL-v1
+    split: our485
+  val_dataset:
+    batch_size: 1
+    is_train: false
+    name: LOLv1
+    num_workers: 2
+    path: /data/gjh8760/datasets/LOL-v1
+    split: eval15
+env_cfg:
+  out_dir: ./runs
+  project_name: fmir
+  run_name: elir_llie_lolv1
+  seed: 2025
+  task: llie
+eval_cfg:
+  chop:
+    chop_size: 256
+    chop_stride: 224
+    sf: 1
+    upscale: 1
+  log_images: true
+  max_log_images: 15
+  metrics:
+  - psnr
+  - ssim
+  - lpips
+fm_cfg:
+  alpha: 0.001
+  beta: 0.001
+  dt: 0.05
+  k_steps: 5
+  method: l2_cfm_mse_loss
+  sigma_min: 1.0e-05
+  sigma_s: 0.025
+  t_emb_dim: 160
+model_cfg:
+  arch_cfg:
+    name: elir
+    params:
+      dec_cfg:
+        name: tiny_dec
+        trainable: false
+      enc_cfg:
+        name: tiny_enc
+        trainable: true
+      fm_cfg:
+        k_steps: 5
+        latent_shape:
+        - 16
+        - 32
+        - 32
+        seed: 2025
+        sigma_s: 0.025
+      fmir_cfg:
+        name: lunet
+        params:
+          ch_mult:
+          - 1
+          - 2
+          - 1
+          - 2
+          hid_channels: 128
+          in_channels: 16
+          n_mid_blocks: 3
+          out_channels: 16
+          overparametrization: true
+          t_emb_dim: 160
+        trainable: true
+      mmse_cfg:
+        name: rrdbnet
+        params:
+          c_hid: 96
+          c_inout: 16
+          n_rrdb: 3
+          overparametrization: true
+        trainable: true
+  teacher_cfg:
+    name: taesd
+    params: {}
+    trainable: false
+train_cfg:
+  check_val_every_n_epoch: 20
+  ema_decay: 0.999
+  epochs: 1000
+  lr: 0.0002
+  max_steps: -1
+  num_sanity_val_steps: 2
+  optimizer: !!python/name:torch.optim.adamw.AdamW ''
+  optimizer_params: {}
+  save_images: true
+  wandb: true

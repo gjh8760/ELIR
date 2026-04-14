@@ -283,6 +283,39 @@ def l2_cfm_mse_loss(model, x_hq, x_lq, fm_cfg, tmodel):
     return loss
 
 
+class _BranchView:
+    """Adapter so existing loss fns (pixel_space_l2_cfm_loss / l2_cfm_mse_loss)
+    can address ElirRetinex sub-branches via the `.mmse / .fmir / .enc` interface
+    they expect from `Elir`.
+    """
+    def __init__(self, mmse, fmir, enc=None):
+        self.mmse = mmse
+        self.fmir = fmir
+        if enc is not None:
+            self.enc = enc
+
+
+def retinex_l2_cfm_loss(model, x_hq, x_lq, fm_cfg, tmodel):
+    """Phase-2 loss. Decompose (x_lq, x_hq) on-the-fly and delegate to the
+    existing pixel-space / latent-space LCFM losses so both branches keep
+    Phase-1-identical training signal."""
+    R_low,  I_low  = model.decompose(x_lq)
+    R_norm, I_norm = model.decompose(x_hq)
+
+    fm_I = fm_cfg.get("fm_cfg_I")
+    fm_R = fm_cfg.get("fm_cfg_R")
+
+    I_view = _BranchView(model.I_mmse, model.I_fmir)
+    R_view = _BranchView(model.R_mmse, model.R_fmir, enc=model.R_enc)
+
+    loss_I = pixel_space_l2_cfm_loss(I_view, I_norm, I_low, fm_I)
+    loss_R = l2_cfm_mse_loss(R_view, R_norm, R_low, fm_R, tmodel)
+
+    lam_I = fm_cfg.get("lambda_I", 1.0)
+    lam_R = fm_cfg.get("lambda_R", 1.0)
+    return lam_I * loss_I + lam_R * loss_R
+
+
 def get_loss(model, x_hq, x_lq, fm_cfg, tmodel=None):
     method = fm_cfg.get("method")
     if method == "fm_loss":
@@ -299,6 +332,8 @@ def get_loss(model, x_hq, x_lq, fm_cfg, tmodel=None):
         loss = l2_cfm_loss(model, x_hq, x_lq, fm_cfg, tmodel)
     elif method == "l2_cfm_mse_loss":
         loss = l2_cfm_mse_loss(model, x_hq, x_lq, fm_cfg, tmodel)
+    elif method == "retinex_l2_cfm_loss":
+        loss = retinex_l2_cfm_loss(model, x_hq, x_lq, fm_cfg, tmodel)
     else:
         assert False, "Error: Unknown training method!"
     return loss

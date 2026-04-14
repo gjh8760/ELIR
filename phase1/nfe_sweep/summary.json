@@ -1,0 +1,47 @@
+{
+  "yaml_path": "configs/elir_infer_llie.yaml",
+  "timestamp": "2026-04-14T17:23:17",
+  "run_name": "elir_llie_lolv1",
+  "results": {
+    "1": {
+      "metrics": {
+        "psnr": 22.064559936523438,
+        "ssim": 0.859544038772583,
+        "lpips": 0.24848346412181854
+      },
+      "run_dir": "./runs/elir_llie_lolv1/nfe_sweep/k1"
+    },
+    "2": {
+      "metrics": {
+        "psnr": 22.09030532836914,
+        "ssim": 0.860674262046814,
+        "lpips": 0.24511951208114624
+      },
+      "run_dir": "./runs/elir_llie_lolv1/nfe_sweep/k2"
+    },
+    "4": {
+      "metrics": {
+        "psnr": 22.094209671020508,
+        "ssim": 0.8607643246650696,
+        "lpips": 0.24503201246261597
+      },
+      "run_dir": "./runs/elir_llie_lolv1/nfe_sweep/k4"
+    },
+    "5": {
+      "metrics": {
+        "psnr": 22.099750518798828,
+        "ssim": 0.8609060049057007,
+        "lpips": 0.2451557070016861
+      },
+      "run_dir": "./runs/elir_llie_lolv1/nfe_sweep/k5"
+    },
+    "8": {
+      "metrics": {
+        "psnr": 22.094079971313477,
+        "ssim": 0.8607579469680786,
+        "lpips": 0.24523040652275085
+      },
+      "run_dir": "./runs/elir_llie_lolv1/nfe_sweep/k8"
+    }
+  }
+}

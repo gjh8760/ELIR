@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>SESSION_HANDOFF</title>
+<style>
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+       max-width: 900px; margin: 2em auto; padding: 0 1em; line-height: 1.6; color: #24292f; }
+h1, h2, h3, h4 { border-bottom: 1px solid #eaecef; padding-bottom: .3em; }
+code { background: #f6f8fa; padding: 2px 4px; border-radius: 3px; font-size: 95%; }
+pre { background: #f6f8fa; padding: 12px; border-radius: 6px; overflow-x: auto; }
+pre code { background: none; padding: 0; }
+table { border-collapse: collapse; margin: 1em 0; }
+th, td { border: 1px solid #d0d7de; padding: 6px 12px; }
+th { background: #f6f8fa; }
+blockquote { border-left: 4px solid #d0d7de; padding: 0 1em; color: #57606a; margin-left: 0; }
+a { color: #0969da; text-decoration: none; }
+a:hover { text-decoration: underline; }
+hr { border: none; border-top: 1px solid #eaecef; }
+</style>
+</head>
+<body>
+<h1 id="phase-1-phase-2">Phase 1 → Phase 2 인수인계 문서</h1>
+<p>Phase 2 작업을 새 세션에서 이어가기 위한 컨텍스트 정리입니다. 이 파일 하나만 읽으면 지금까지의 결정/변경/결과를 모두 파악할 수 있도록 작성했습니다.</p>
+
+<div style="border: 2px solid #cf222e; background: #ffebe9; padding: 12px 16px; border-radius: 6px; margin: 1em 0;">
+<strong>⚠️ SOTA 타깃 공지</strong><br>
+현재 Phase 1 결과는 <strong>LOL-v1 PSNR 22.10 dB</strong>입니다. 그러나 LLIE 분야에서 논문 경쟁력을 갖추려면 <strong>PSNR 25.5 ~ 26+ dB</strong> (SOTA 근방)가 필요합니다. 즉 <strong>+3dB 이상의 개선</strong>이 반드시 Phase 2~4 안에서 나와야 합니다.<br><br>
+Phase 2 이후 모든 설계 결정(decomposer 선택, I/R 공간 배치, 네트워크 크기, data aug 등)은 <strong>이 +3dB 갭을 좁히는 것을 1순위</strong>로 삼아야 합니다. "Phase 1 대비 0.5dB 개선"은 SOTA 경쟁에 턱없이 부족하므로, Phase 2 결과가 24dB 미만에 머무르면 Retinex 설계 고수보다는 근본적 pivot(더 큰 VAE/pixel-space 병행/용량 증가/외부 데이터)을 우선 검토해야 합니다.
+</div>
+
+<hr />
+<h2 id="1">1. 전체 계획 (요약)</h2>
+<ul>
+<li>상위 계획서: <a href="../experiment_plan_v2_LCFM.html"><code>experiment_plan_v2_LCFM.html</code></a></li>
+<li>아이디어: <strong>ELIR의 LCFM(Latent Consistency Flow Matching)</strong> + <strong>Retinex 분해(I-flow / R-flow) 기반 dual-flow</strong> → LLIE 특화 + σ 기반 perception-distortion 제어 (PMRF 아이디어 차용). NeurIPS 2026 목표.</li>
+<li>Phase 구성:</li>
+<li>Phase 0: LCFM이 LLIE에서 동작하는지 최소 실험</li>
+<li><strong>Phase 1 (현재 완료)</strong>: Retinex 없이 direct LCFM baseline 확립</li>
+<li><strong>Phase 2 (다음)</strong>: Retinex 분해 후 I-flow, R-flow 각각 학습</li>
+<li>Phase 3: Coupled dual-flow with cross-guidance (논문 핵심 novelty)</li>
+<li>Phase 4: PMRF-style σ controllability</li>
+<li>Phase 5: Full benchmark + ablation</li>
+<li>Phase 6: Paper writing</li>
+</ul>
+<hr />
+<h2 id="2-phase-1">2. Phase 1: 무엇을 했나</h2>
+<h3 id="21">2.1 코드베이스</h3>
+<p>ELIR 원본 파이프라인을 LOL-v1에 맞춰 실행한 것이 현재 레포 상태입니다.</p>
+<ul>
+<li>AutoEncoder (teacher, frozen): <strong>TAESD3</strong> (<code>madebyollin/taesd3</code>)</li>
+<li>Trainable Encoder Eω: <code>tiny_enc</code> (TAESD3 encoder 초기화 후 fine-tune)</li>
+<li>Coarse Estimator gφ: <strong>RRDBNet</strong> (<code>c_inout=16, c_hid=96, n_rrdb=3</code>, ~5.5M params)</li>
+<li><a href="../ELIR/models/rrdbnet.py">ELIR/models/rrdbnet.py</a></li>
+<li>Flow Network vθ: <strong>LUNet</strong> (<code>ch_mult=[1,2,1,2], hid_channels=128, n_mid_blocks=3, t_emb_dim=160</code>, ~29.6M params)</li>
+<li><a href="../ELIR/models/lunet.py">ELIR/models/lunet.py</a></li>
+<li>입력은 <strong>z_t(16ch)만</strong>, z_coarse는 flow의 source z_0로 사용되며 채널 concat은 아님</li>
+<li>Time conditioning: sinusoidal pos_emb → MLP → ResnetBlock 출력에 per-channel bias로 더함 (AdaGN 아님)</li>
+<li>Loss: <code>l2_cfm_mse_loss</code> — MMSE + <strong>segment-endpoint consistency</strong> + pixel-space MSE, α=β=0.001</li>
+<li><a href="../ELIR/training/losses.py">ELIR/training/losses.py</a> L234-281</li>
+<li>수학적으로는 OT-CFM target <code>X_hq − (1−σ_min)·X_0</code>과 동치이지만 코드에선 segment 끝점 일치 형태로 표현</li>
+</ul>
+<h3 id="22-config-configselir_train_llieyaml">2.2 Config (<a href="../configs/elir_train_llie.yaml">configs/elir_train_llie.yaml</a>)</h3>
+<ul>
+<li>FM: <code>σ_min=1e-5, σ_s=0.025, dt=0.05, k_steps=5, α=β=0.001</code></li>
+<li>Train: AdamW lr=2e-4, batch=8, 1000 epochs (~60K steps), EMA 0.999</li>
+<li>Dataset: LOL-v1 <code>our485</code> train / <code>eval15</code> eval, 256×256 random crop</li>
+<li>Eval chop: <code>chop_size=256, chop_stride=224</code> (train) / <code>128</code> (infer)</li>
+</ul>
+<h3 id="23-lol-v1-eval15">2.3 최종 결과 (LOL-v1 eval15)</h3>
+<table>
+<thead>
+<tr>
+<th>PSNR</th>
+<th>SSIM</th>
+<th>LPIPS</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>22.0998</strong> dB</td>
+<td><strong>0.8609</strong></td>
+<td><strong>0.2452</strong></td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>결과 저장: <a href="../phase1/"><code>phase1/</code></a> 폴더</li>
+<li><a href="../phase1/README.html">phase1/README.md</a> — 세팅, 메트릭, 재현 방법 요약</li>
+<li><code>phase1/config.yaml</code>, <code>phase1/metrics/</code>, <code>phase1/predictions/</code> (eval15 15장), <code>phase1/val_samples/</code>, <code>phase1/checkpoints/</code> (symlink)</li>
+<li>원본 실험 디렉토리: <code>runs/elir_llie_lolv1/</code> (<code>elir.pth</code>, Lightning ckpt, wandb 로그 포함)</li>
+</ul>
+<h3 id="24-nfe-sweep">2.4 NFE (k_steps) Sweep 결과</h3>
+<p>학습은 <code>k_steps=5</code>로 했지만 추론 시 K를 바꿔가며 측정한 결과입니다 (LOL-v1 eval15). Consistency loss 덕분에 few-step inference가 잘 작동함을 확인했습니다.</p>
+<table>
+<thead>
+<tr><th>k_steps</th><th>PSNR</th><th>SSIM</th><th>LPIPS</th></tr>
+</thead>
+<tbody>
+<tr><td>1</td><td>22.0646</td><td>0.8595</td><td>0.2485</td></tr>
+<tr><td>2</td><td>22.0903</td><td>0.8607</td><td>0.2451</td></tr>
+<tr><td>4</td><td>22.0942</td><td>0.8608</td><td>0.2450</td></tr>
+<tr><td><strong>5</strong></td><td><strong>22.0998</strong></td><td><strong>0.8609</strong></td><td>0.2452</td></tr>
+<tr><td>8</td><td>22.0941</td><td>0.8608</td><td>0.2452</td></tr>
+</tbody>
+</table>
+<ul>
+<li>K=1로 내려도 PSNR 22.06 — 5-NFE 대비 <strong>0.035dB 열화만</strong>으로 1-step inference 가능.</li>
+<li>K=8로 올려도 이점 없음 (segment 내부 중복 연산).</li>
+<li>K=2가 K=5 품질의 99.6%를 1/2.5 연산으로 달성 → 효율-품질 sweet spot.</li>
+<li>상세 결과: <a href="../phase1/nfe_sweep/summary.json">phase1/nfe_sweep/summary.json</a>, 재현 스크립트 <a href="../scripts/run_nfe_sweep.sh">scripts/run_nfe_sweep.sh</a> (GPU 2, elir 가상환경).</li>
+</ul>
+
+<h3 id="25-phase-1-gono-go">2.5 Phase 1 Go/No-Go 판정</h3>
+<p>계획서 기준 "2-NFE에서 PSNR ≥ 20dB" 조건을 크게 상회 (2-NFE에서 22.09dB). NFE sweep까지 완료하여 <strong>Phase 2로 진행</strong>합니다.</p>
+<hr />
+<h2 id="3">3. 현재 세션에서 변경한 것들 (코드/문서)</h2>
+<p>Phase 2로 넘어가기 전에 이 세션에서 손본 항목 목록입니다. 새 세션이 "왜 이렇게 되어 있지?"를 궁금해하지 않도록 기록합니다.</p>
+<h3 id="31-experiment_plan_v2_lcfmmd-phase-1">3.1 <code>experiment_plan_v2_LCFM.md</code> Phase 1 섹션 오류 수정</h3>
+<p>계획서 Phase 1 설명이 실제 코드와 여러 군데 불일치 → 실제 코드 기준으로 전부 교정.
+주요 교정 항목:
+- Coarse estimator: "3-layer residual CNN (~2M)" → <strong>RRDBNet (~5.5M)</strong>
+- Flow <code>ch_mult</code>: <code>[1,2,4,4]</code> → <strong><code>[1,2,1,2]</code></strong>
+- Flow base ch: 64 → <strong>128</strong>
+- Flow 입력: "concat(z_t, z_coarse)=32ch" → <strong>z_t만 (16ch)</strong>
+- Time conditioning: AdaGN → <strong>MLP bias</strong>
+- <code>σ_min</code>: 1e-4 → <strong>1e-5</strong>, <code>σ_s</code>: 0.1 → <strong>0.025</strong>
+- Batch: 16 → <strong>8</strong>
+- 학습 스케줄: "200K+100K 2-phase" → <strong>1000 epochs 단일 스케줄</strong>
+- Loss 수식: 단순 velocity-MSE → <strong>segment-endpoint consistency + pixel MSE</strong></p>
+<p>상세 내역은 plan 파일 참고: <code>~/.claude/plans/frolicking-finding-eich.md</code></p>
+<h3 id="32-evalpy">3.2 <code>eval.py</code> — 메트릭 파일 저장 추가</h3>
+<ul>
+<li>기존엔 eval 결과가 stdout에만 출력되던 것을 파일로도 저장하도록 수정.</li>
+<li>저장 위치: <code>{run_dir}/eval_metrics.json</code> (기계 판독용, 실행마다 덮어쓰기) + <code>{run_dir}/eval_metrics.txt</code> (타임스탬프 포함 append 로그).</li>
+<li>해당 코드: <a href="../eval.py">eval.py</a> L50~ (datetime + json import 포함).</li>
+</ul>
+<h3 id="33-imagespliterth-chop">3.3 <code>ImageSpliterTh</code> — 가로/세로 비대칭 chop 지원</h3>
+<ul>
+<li>기존엔 <code>chop_size</code> / <code>chop_stride</code> 스칼라만 지원하여 H=W만 가능했음.</li>
+<li><a href="../ELIR/utils.py">ELIR/utils.py</a> <code>ImageSpliterTh</code>가 <code>pch_size</code> / <code>stride</code>로 int 또는 <code>(h, w)</code> 튜플을 받도록 수정. 내부에서 H/W 분리, blending mask overlap도 축별로 적용.</li>
+<li>호출부(<a href="../ELIR/irsetup.py">ELIR/irsetup.py</a>, <a href="../infer.py">infer.py</a>)에서 config의 <code>chop_size_h</code> / <code>chop_size_w</code> / <code>chop_stride_h</code> / <code>chop_stride_w</code>를 우선 사용, 없으면 기존 <code>chop_size</code> / <code>chop_stride</code>로 fallback (후방 호환).</li>
+<li>사용 예:
+  <code>yaml
+  chop: {sf: 1, upscale: 1, chop_size_h: 400, chop_size_w: 600, chop_stride_h: 336, chop_stride_w: 512}</code></li>
+<li>LOL-v1이 600×400(H=400, W=600)이므로 Phase 2에서 chop 없이 한 번에 처리하고 싶다면 이 기능을 쓸 수 있음.</li>
+</ul>
+<hr />
+<h2 id="4-phase-2">4. Phase 2: 다음 세션에서 할 일 (계획 요약)</h2>
+<p>상위 계획서의 Phase 2 섹션(<code>experiment_plan_v2_LCFM.md</code> L146~) 기반입니다.</p>
+<h3 id="41">4.1 목표</h3>
+<p>Retinex 분해 후 Illumination(I), Reflectance(R)에 각각 별도의 LCFM을 적용하여 Phase 1 대비 성능 향상을 검증.</p>
+<h3 id="42">4.2 주요 결정 사항 (계획서 권고안)</h3>
+<ul>
+<li><strong>I는 pixel space</strong>, <strong>R은 latent space</strong>에서 처리 (option C)</li>
+<li>I: 1ch, low-frequency/smooth → latent 이점 적고 AE 3ch 입력과 어색</li>
+<li>R: 3ch, complex noise/texture → latent flow 유리</li>
+<li>I-flow: 경량 CNN (~3M), pixel space, 1~2 NFE로 충분 예상</li>
+<li>R-flow: LUNet (~10M), latent space, 2~4 NFE</li>
+</ul>
+<h3 id="43-retinex-decomposer">4.3 Retinex Decomposer 선택</h3>
+<p>계획서 권고 순서:
+1. <strong>Option 2 (max-channel 기반, 학습 불필요)</strong> — 1일 내 빠른 검증
+2. Option 1 (RetinexNet Decom-Net, pretrained) — 본 실험
+3. Option 3 (KinD decomposer) — ablation</p>
+<h3 id="44">4.4 주의사항</h3>
+<ul>
+<li>Decomposer는 반드시 <strong>freeze</strong> (joint training 시 decomposition degenerate 위험)</li>
+<li>LOL-v1 485장은 매우 작음 → data augmentation 필수</li>
+<li>Phase 1과 동일한 TAESD3 AutoEncoder 재사용 가능 (R이 3ch RGB이므로 자연스러움)</li>
+<li>Phase 1 Encoder Eω / Coarse Estimator는 R-flow용으로 처음부터 다시 학습해야 함 (입력 도메인이 RGB LQ → R_low로 바뀜)</li>
+</ul>
+<h3 id="45-ablation-phase-2">4.5 Ablation (Phase 2 내)</h3>
+<ul>
+<li>Direct LCFM (Phase 1) vs. Retinex + component LCFM</li>
+<li>I-flow + R에 plain denoiser (IllumFlow 재현) vs. Ours</li>
+<li>I-flow NFE: 1, 2, 4</li>
+<li>R-flow NFE: 1, 2, 4, 8</li>
+<li>Decomposer 3종 비교</li>
+</ul>
+<h3 id="46-gono-go">4.6 Go/No-Go</h3>
+<ul>
+<li>✅ Phase 2 &gt; Phase 1 (PSNR ≥ 0.5dB or LPIPS 개선) → Phase 3 (coupled dual-flow)</li>
+<li>❌ Phase 2 ≤ Phase 1 → Retinex 포기, Phase 1 + Phase 4(PMRF)로 논문 방향 선회</li>
+</ul>
+<hr />
+<h2 id="5">5. 레포 상태 메모</h2>
+<ul>
+<li>브랜치: <code>main</code>, working tree에 아래 수정사항 <strong>uncommit 상태</strong>일 수 있음</li>
+<li>수정된 파일: <code>eval.py</code>, <code>ELIR/utils.py</code>, <code>ELIR/irsetup.py</code>, <code>infer.py</code>, <code>experiment_plan_v2_LCFM.md</code></li>
+<li>신규 파일: <code>phase1/…</code>, <code>phase2/SESSION_HANDOFF.md</code>(이 파일), <code>configs/elir_infer_llie.yaml</code>, <code>configs/elir_train_llie.yaml</code> (무시 목록에서 제외된 상태), <code>ELIR/datasets/lol.py</code></li>
+<li>Python 환경 / 데이터 경로는 Phase 1과 동일하게 <code>/data/gjh8760/datasets/LOL-v1</code> 사용 중.</li>
+<li>Host: Linux, 단일 GPU 환경 가정 (학습 시간: Phase 1 기준 ~1일).</li>
+</ul>
+<hr />
+<h2 id="6">6. 커뮤니케이션 선호</h2>
+<ul>
+<li>사용자 auto-memory에 기록된 규칙: <strong>한국어 응답은 존댓말(~입니다/~습니다), 개조식(~임/~됨) 금지</strong>.</li>
+<li>응답은 간결하게, 단 설계·결정 사항은 근거와 함께 정리해 남기는 것을 선호.</li>
+</ul>
+<hr />
+<h2 id="7">7. 즉시 착수 시 체크리스트 (새 세션 초반용)</h2>
+<ol>
+<li>[ ] <code>experiment_plan_v2_LCFM.md</code> Phase 2 섹션 재독</li>
+<li>[ ] <code>phase1/README.md</code> 및 <code>metrics/eval_metrics.json</code>으로 베이스라인 수치 확인</li>
+<li>[ ] Decomposer 구현: 먼저 max-channel(Option 2) 하루 만에 검증 → 효과 있으면 RetinexNet pretrained로 교체</li>
+<li>[ ] Retinex용 데이터 로더 확장: <code>(x_lq, x_hq)</code> → <code>(R_low, I_low, R_norm, I_norm, x_lq, x_hq)</code> 로 확장 (또는 on-the-fly decompose)</li>
+<li>[ ] I-flow 네트워크 설계 (pixel space 경량 CNN) + 별도 trainer 또는 dual-head setup 결정</li>
+<li>[ ] R-flow는 Phase 1 아키텍처(LUNet) 거의 그대로 재사용, 입력만 R_low로 변경</li>
+<li>[ ] <code>configs/elir_train_llie_retinex.yaml</code> (가칭) 작성</li>
+<li>[ ] Ablation 결과 기록은 Phase 1과 동일한 <code>phase2/…</code> 구조로 누적</li>
+</ol>
+</body>
+</html>

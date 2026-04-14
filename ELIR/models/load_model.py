@@ -16,6 +16,17 @@ def get_model(cfg):
         model = Elir(**model_params)
         model.load_weights(model_path)
         return model
+    elif model_name == "elir_retinex":
+        from ELIR.models.elir_retinex import ElirRetinex
+        model = ElirRetinex(**model_params)
+        model.load_weights(model_path)
+        return model
+    elif model_name == "max_channel_decomposer":
+        from ELIR.models.decomposers import MaxChannelDecomposer
+        model = MaxChannelDecomposer(**model_params)
+    elif model_name == "retinexnet_decomposer":
+        from ELIR.models.decomposers import RetinexNetDecomposer
+        model = RetinexNetDecomposer(**model_params)
     elif model_name == "lunet":
         from ELIR.models.lunet import LUnet
         model = LUnet(**model_params)

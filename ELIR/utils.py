@@ -1,5 +1,31 @@
 import torch
 import math
+import numpy as np
+
+
+def create_plateau_blending_mask(patch_height, patch_width, overlap_size_y, overlap_size_x, min_weight):
+    """
+    Sigmoid-based 2D plateau blending mask: center=1, overlap edges smoothly ramp down.
+    Returns a torch float tensor of shape (1, 1, patch_height, patch_width).
+    """
+    ramp_size_y = min(overlap_size_y, patch_height // 2)
+    ramp_size_x = min(overlap_size_x, patch_width // 2)
+
+    y = np.linspace(-6, 6, ramp_size_y)
+    ramp_1d_y = 1 / (1 + np.exp(-y))
+    x = np.linspace(-6, 6, ramp_size_x)
+    ramp_1d_x = 1 / (1 + np.exp(-x))
+
+    center_h = patch_height - 2 * ramp_size_y
+    center_w = patch_width - 2 * ramp_size_x
+
+    mask_y = np.concatenate([ramp_1d_y, np.ones(center_h), ramp_1d_y[::-1]])
+    mask_x = np.concatenate([ramp_1d_x, np.ones(center_w), ramp_1d_x[::-1]])
+
+    blending_mask = np.outer(mask_y, mask_x)
+    scaled_mask = min_weight + blending_mask * (1 - min_weight)
+    scaled_mask = torch.from_numpy(scaled_mask).float()
+    return scaled_mask.unsqueeze(0).unsqueeze(0)
 
 
 def get_model_size(model):
@@ -42,21 +68,27 @@ class ImageSpliterTh:
         '''
         Input:
             im: n x c x h x w, torch tensor, float, low-resolution image in SR
-            pch_size, stride: patch setting
+            pch_size, stride: patch setting. Each can be an int (applied to
+                both H and W) or a (h, w) tuple/list for anisotropic patches.
             sf: scale factor in image super-resolution
             pch_bs: aggregate pchs to processing, only used when inputing single image
         '''
-        assert stride <= pch_size
-        self.stride = stride
-        self.pch_size = pch_size
+        pch_h, pch_w = self._pair(pch_size)
+        stride_h, stride_w = self._pair(stride)
+        assert stride_h <= pch_h and stride_w <= pch_w
+        self.pch_h, self.pch_w = pch_h, pch_w
+        self.stride_h, self.stride_w = stride_h, stride_w
+        # Backward compatible scalar aliases (used only when h==w)
+        self.pch_size = pch_h
+        self.stride = stride_h
         self.sf = sf
         self.extra_bs = extra_bs
 
         bs, chn, height, width= im.shape
         self.true_bs = bs
 
-        self.height_starts_list = self.extract_starts(height)
-        self.width_starts_list = self.extract_starts(width)
+        self.height_starts_list = self.extract_starts(height, pch_h, stride_h)
+        self.width_starts_list = self.extract_starts(width, pch_w, stride_w)
         self.starts_list = []
         for ii in self.height_starts_list:
             for jj in self.width_starts_list:
@@ -69,14 +101,31 @@ class ImageSpliterTh:
         self.im_res = torch.zeros([bs, chn, height*sf, width*sf], dtype=im.dtype, device=im.device)
         self.pixel_count = torch.zeros([bs, chn, height*sf, width*sf], dtype=im.dtype, device=im.device)
 
-    def extract_starts(self, length):
-        if length <= self.pch_size:
+        out_pch_h = pch_h * sf
+        out_pch_w = pch_w * sf
+        overlap_y = max(pch_h - stride_h, 0) * sf
+        overlap_x = max(pch_w - stride_w, 0) * sf
+        self.blend_mask = create_plateau_blending_mask(
+            patch_height=out_pch_h, patch_width=out_pch_w,
+            overlap_size_y=overlap_y, overlap_size_x=overlap_x,
+            min_weight=1e-6,
+        ).to(device=im.device, dtype=im.dtype)
+
+    @staticmethod
+    def _pair(v):
+        if isinstance(v, (list, tuple)):
+            assert len(v) == 2, "pch_size/stride tuple must be (h, w)"
+            return int(v[0]), int(v[1])
+        return int(v), int(v)
+
+    def extract_starts(self, length, pch, stride):
+        if length <= pch:
             starts = [0,]
         else:
-            starts = list(range(0, length, self.stride))
+            starts = list(range(0, length, stride))
             for ii in range(len(starts)):
-                if starts[ii] + self.pch_size > length:
-                    starts[ii] = length - self.pch_size
+                if starts[ii] + pch > length:
+                    starts[ii] = length - pch
             starts = sorted(set(starts), key=starts.index)
         return starts
 
@@ -91,8 +140,8 @@ class ImageSpliterTh:
             index_infos = []
             current_starts_list = self.starts_list[self.count_pchs:self.count_pchs+self.extra_bs]
             for ii, (h_start, w_start) in enumerate(current_starts_list):
-                w_end = w_start + self.pch_size
-                h_end = h_start + self.pch_size
+                w_end = w_start + self.pch_w
+                h_end = h_start + self.pch_h
                 current_pch = self.im_ori[:, :, h_start:h_end, w_start:w_end]
                 if ii == 0:
                     pch = current_pch
@@ -122,9 +171,11 @@ class ImageSpliterTh:
         assert len(pch_list) == len(index_infos)
         for ii, (h_start, h_end, w_start, w_end) in enumerate(index_infos):
             current_pch = pch_list[ii]
-            self.im_res[:, :, h_start:h_end, w_start:w_end] += current_pch
-            self.pixel_count[:, :, h_start:h_end, w_start:w_end] += 1
+            h_span = h_end - h_start
+            w_span = w_end - w_start
+            mask = self.blend_mask[:, :, :h_span, :w_span]
+            self.im_res[:, :, h_start:h_end, w_start:w_end] += current_pch * mask
+            self.pixel_count[:, :, h_start:h_end, w_start:w_end] += mask
 
     def gather(self):
-        assert torch.all(self.pixel_count != 0)
-        return self.im_res.div(self.pixel_count)
+        return self.im_res.div(self.pixel_count.clamp(min=1e-6))

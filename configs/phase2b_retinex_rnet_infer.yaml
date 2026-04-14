@@ -1,0 +1,54 @@
+# ###########################################
+# Phase 2-B inference
+# ###########################################
+env_cfg:
+  run_name: phase2b_retinex_rnet
+  project_name: fmir
+  task: llie
+  seed: 2025
+
+
+dataset_cfg:
+  val_dataset: {name: LOLv1, path: /data/gjh8760/datasets/LOL-v1, split: eval15, is_train: False, batch_size: 1, num_workers: 2}
+
+
+model_cfg:
+  arch_cfg:
+    name: elir_retinex
+    path: ./runs/phase2b_retinex_rnet/elir.pth
+    params:
+      decomposer_cfg:
+        name: retinexnet_decomposer
+        trainable: False
+        params: {pretrained_path: third_party/retinexnet/decom_net.pth}
+
+      R_fm_cfg: {k_steps: 5, sigma_s: 0.025, latent_shape: [16, 32, 32]}
+      R_fmir_cfg:
+        name: lunet
+        trainable: False
+        params: {ch_mult: [1, 2, 1, 2], n_mid_blocks: 3, in_channels: 16, hid_channels: 128,
+                 out_channels: 16, t_emb_dim: 160, overparametrization: False}
+      R_mmse_cfg:
+        name: rrdbnet
+        trainable: False
+        params: {c_inout: 16, c_hid: 96, n_rrdb: 3, overparametrization: False}
+      R_enc_cfg: {name: tiny_enc, trainable: False}
+      R_dec_cfg: {name: tiny_dec, trainable: False}
+
+      I_fm_cfg: {k_steps: 2, sigma_s: 0.01}
+      I_fmir_cfg:
+        name: lunet
+        trainable: False
+        params: {ch_mult: [1, 2, 1], n_mid_blocks: 2, in_channels: 1, hid_channels: 32,
+                 out_channels: 1, t_emb_dim: 160, overparametrization: False}
+      I_mmse_cfg:
+        name: rrdbnet
+        trainable: False
+        params: {c_inout: 1, c_hid: 32, n_rrdb: 2, overparametrization: False}
+
+
+eval_cfg:
+  metrics: ["psnr", "ssim", "lpips"]
+  chop: {sf: 1, upscale: 1, chop_size_h: 256, chop_size_w: 256, chop_stride_h: 24, chop_stride_w: 43}
+  in_folder:  /data/gjh8760/datasets/LOL-v1/eval15/low
+  out_folder: ./runs/phase2b_retinex_rnet/predictions

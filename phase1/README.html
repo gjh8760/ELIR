@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>README</title>
+<style>
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+       max-width: 900px; margin: 2em auto; padding: 0 1em; line-height: 1.6; color: #24292f; }
+h1, h2, h3, h4 { border-bottom: 1px solid #eaecef; padding-bottom: .3em; }
+code { background: #f6f8fa; padding: 2px 4px; border-radius: 3px; font-size: 95%; }
+pre { background: #f6f8fa; padding: 12px; border-radius: 6px; overflow-x: auto; }
+pre code { background: none; padding: 0; }
+table { border-collapse: collapse; margin: 1em 0; }
+th, td { border: 1px solid #d0d7de; padding: 6px 12px; }
+th { background: #f6f8fa; }
+blockquote { border-left: 4px solid #d0d7de; padding: 0 1em; color: #57606a; margin-left: 0; }
+a { color: #0969da; text-decoration: none; }
+a:hover { text-decoration: underline; }
+hr { border: none; border-top: 1px solid #eaecef; }
+</style>
+</head>
+<body>
+<h1 id="phase-1-direct-lcfm-llie-baseline">Phase 1 — Direct LCFM LLIE Baseline</h1>
+<p><code>experiment_plan_v2_LCFM.md</code>의 Phase 1에 해당하는 실험 결과입니다. ELIR 파이프라인(TAESD3 + RRDBNet coarse + LUNet flow)을 LOL-v1에 그대로 적용한 단일-flow 베이스라인입니다.</p>
+<h2 id="_1">실험 세팅</h2>
+<table>
+<thead>
+<tr>
+<th>항목</th>
+<th>값</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Task</td>
+<td>Low-Light Image Enhancement</td>
+</tr>
+<tr>
+<td>Dataset (train)</td>
+<td>LOL-v1, <code>our485</code>, 485 pairs, 256×256 random crop</td>
+</tr>
+<tr>
+<td>Dataset (eval)</td>
+<td>LOL-v1, <code>eval15</code>, 15 pairs</td>
+</tr>
+<tr>
+<td>AutoEncoder (teacher)</td>
+<td>TAESD3 (<code>madebyollin/taesd3</code>), frozen</td>
+</tr>
+<tr>
+<td>Trainable Encoder Eω</td>
+<td><code>tiny_enc</code> (TAESD3 encoder 초기화, fine-tune)</td>
+</tr>
+<tr>
+<td>Coarse Estimator gφ</td>
+<td>RRDBNet (<code>c_inout=16, c_hid=96, n_rrdb=3</code>)</td>
+</tr>
+<tr>
+<td>Flow Network vθ</td>
+<td>LUNet (<code>ch_mult=[1,2,1,2], hid_channels=128, n_mid_blocks=3, t_emb_dim=160</code>)</td>
+</tr>
+<tr>
+<td>Loss</td>
+<td><code>l2_cfm_mse_loss</code> (MMSE + segment-endpoint consistency + pixel MSE, α=β=0.001)</td>
+</tr>
+<tr>
+<td>FM hyperparams</td>
+<td><code>σ_min=1e-5, σ_s=0.025, dt=0.05, k_steps=5</code></td>
+</tr>
+<tr>
+<td>Optimizer</td>
+<td>AdamW, lr=2e-4, EMA decay 0.999</td>
+</tr>
+<tr>
+<td>Batch size</td>
+<td>8</td>
+</tr>
+<tr>
+<td>Epochs</td>
+<td>1000 (≈ 60K steps)</td>
+</tr>
+<tr>
+<td>Chop (eval)</td>
+<td><code>chop_size=256, chop_stride=224</code> (LOL-v1 600×400에서 겹침 inference)</td>
+</tr>
+<tr>
+<td>Seed</td>
+<td>2025</td>
+</tr>
+</tbody>
+</table>
+<p>전체 config는 <a href="config.yaml">config.yaml</a> 참고입니다.</p>
+<h2 id="lol-v1-eval15">최종 메트릭 (LOL-v1 eval15)</h2>
+<table>
+<thead>
+<tr>
+<th>Metric</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>PSNR</td>
+<td><strong>22.0998</strong> dB</td>
+</tr>
+<tr>
+<td>SSIM</td>
+<td><strong>0.8609</strong></td>
+</tr>
+<tr>
+<td>LPIPS</td>
+<td><strong>0.2452</strong></td>
+</tr>
+</tbody>
+</table>
+<p>원본 파일은 <a href="metrics/eval_metrics.json">metrics/eval_metrics.json</a>, <a href="metrics/eval_metrics.txt">metrics/eval_metrics.txt</a> 입니다.</p>
+<h2 id="nfe-k_steps-sweep">NFE (k_steps) Sweep</h2>
+<p>학습은 <code>k_steps=5</code>로 했지만 추론 시에는 다른 값을 써도 동작합니다 (LCFM의 consistency loss 덕). LOL-v1 eval15에서 측정한 결과입니다.</p>
+<table>
+<thead>
+<tr>
+<th>k_steps</th>
+<th>PSNR</th>
+<th>SSIM</th>
+<th>LPIPS</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>22.0646</td>
+<td>0.8595</td>
+<td>0.2485</td>
+</tr>
+<tr>
+<td>2</td>
+<td>22.0903</td>
+<td>0.8607</td>
+<td>0.2451</td>
+</tr>
+<tr>
+<td>4</td>
+<td>22.0942</td>
+<td>0.8608</td>
+<td>0.2450</td>
+</tr>
+<tr>
+<td><strong>5</strong></td>
+<td><strong>22.0998</strong></td>
+<td><strong>0.8609</strong></td>
+<td>0.2452</td>
+</tr>
+<tr>
+<td>8</td>
+<td>22.0941</td>
+<td>0.8608</td>
+<td>0.2452</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>K=1로 내려도 PSNR 22.06 — 5-NFE 대비 0.035dB 열화만으로 few-step inference 가능.</li>
+<li>K=8로 올려도 이점 없음 (segment 내부 중복 연산).</li>
+<li>상세 결과: <a href="nfe_sweep/summary.json">nfe_sweep/summary.json</a>, 각 <code>k*/</code> 하위 폴더.</li>
+<li>재현: <code>bash scripts/run_nfe_sweep.sh</code> (GPU 2번 사용, elir 가상환경).</li>
+</ul>
+<h2 id="_2">폴더 구성</h2>
+<pre><code>phase1/
+├── README.md              # (이 파일)
+├── config.yaml            # 학습/평가 당시 config snapshot (runs/elir_llie_lolv1/conf.yml 사본)
+├── metrics/
+│   ├── eval_metrics.json  # 마지막 eval 메트릭 (기계가 읽기 좋은 형태)
+│   └── eval_metrics.txt   # eval 메트릭 누적 로그
+├── predictions/           # LOL-v1 eval15 전체 15장의 enhancement 결과 (infer.py 출력, chop_stride=128)
+├── val_samples/           # 학습 중 검증 시 저장된 샘플 이미지 (epoch_XXXX/)
+└── checkpoints/           # runs/elir_llie_lolv1/ 내 .pth / .ckpt 에 대한 symlink
+    ├── elir.pth                         # 추론용 경량 weights
+    ├── epoch=999-step=60000.ckpt        # 최종 Lightning checkpoint
+    └── epoch=1-step=120.ckpt            # 초반 sanity checkpoint
+</code></pre>
+<h2 id="_3">재현 방법</h2>
+<pre><code class="language-bash"># 평가
+python eval.py --yaml configs/elir_infer_llie.yaml
+
+# 이미지 추론 (PNG 저장)
+python infer.py --yaml configs/elir_infer_llie.yaml
+</code></pre>
+<p><code>configs/elir_infer_llie.yaml</code>의 <code>arch_cfg.path</code>가 <a href="checkpoints/elir.pth">checkpoints/elir.pth</a>(또는 원본 <code>runs/elir_llie_lolv1/elir.pth</code>)를 가리키도록 해야 합니다.</p>
+</body>
+</html>
